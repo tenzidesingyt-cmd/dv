@@ -5,8 +5,10 @@ import re
 import datetime
 import html
 import base64
+import os
 
 import httpx
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -16,10 +18,18 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Импорт конфигурации
-from src.config import BOT_TOKEN, ADMIN_ID, PAYMENT_PROVIDER_TOKEN, PAYMENT_CURRENCY
+from src.config import (
+    BOT_TOKEN, ADMIN_ID, PAYMENT_PROVIDER_TOKEN, PAYMENT_CURRENCY,
+    IS_PRODUCTION, WEBHOOK_PORT, WEBHOOK_PATH, WEBHOOK_URL,
+    WEBHOOK_HOST
+)
 from src.database import (
     init_db, get_user, update_user, add_points, ensure_user_name,
     save_hw_result, update_streak, add_to_chat_history, get_chat_history,
@@ -194,7 +204,7 @@ async def process_hw_result(msg: types.Message, state: FSMContext, ai_raw: str, 
             reply_markup=get_admin_hw_kb(msg.from_user.id, u["lesson_num"])
         )
     except Exception as e:
-        logging.error(f"Не удалось уведомить админа: {e}")
+        logger.error(f"Не удалось уведомить админа: {e}")
 
     await state.clear()
 
@@ -437,7 +447,7 @@ async def practice_words_audio(msg: types.Message, state: FSMContext):
             audio_bytes = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{voice_file.file_path}")
             audio_data = audio_bytes.content
     except Exception as e:
-        logging.error(f"Ошибка загрузки аудио слов: {e}")
+        logger.error(f"Ошибка загрузки аудио слов: {e}")
         await processing_msg.delete()
         return await msg.answer("❌ Не удалось загрузить аудио. Попробуй ещё раз.", reply_markup=word_learning_kb())
 
@@ -816,7 +826,7 @@ async def process_audio_hw(msg: types.Message, state: FSMContext):
             )
             audio_bytes = voice_response.content
     except Exception as e:
-        logging.error(f"Ошибка скачивания аудио: {e}")
+        logger.error(f"Ошибка скачивания аудио: {e}")
         await processing_msg.delete()
         return await msg.answer(
             "❌ Не удалось загрузить аудио. Попробуй ещё раз.",
@@ -1021,7 +1031,7 @@ async def process_hw_photo(msg: types.Message, state: FSMContext):
             photo_bytes = photo_response.content
         photo_base64 = base64.b64encode(photo_bytes).decode("utf-8")
     except Exception as e:
-        logging.error(f"Ошибка фото: {e}")
+        logger.error(f"Ошибка фото: {e}")
         await checking_msg.delete()
         return await msg.answer("❌ Не удалось загрузить фото. Попробуй ещё раз или отправь текстом.")
 
@@ -1474,9 +1484,9 @@ async def notification_loop():
                         )
                         notified_this_minute.add(cache_key)
                     except Exception as e:
-                        logging.error(f"Уведомление {row['user_id']}: {e}")
+                        logger.error(f"Уведомление {row['user_id']}: {e}")
         except Exception as e:
-            logging.error(f"notification_loop: {e}")
+            logger.error(f"notification_loop: {e}")
             await asyncio.sleep(60)
 
 
@@ -1499,23 +1509,69 @@ async def review_words_loop():
                     new_date = (datetime.date.today() + datetime.timedelta(days=nd)).strftime("%Y-%m-%d")
                     await update_word_review(row["id"], new_date, ns)
                 except Exception as e:
-                    logging.error(f"review word id={row['id']}: {e}")
+                    logger.error(f"review word id={row['id']}: {e}")
             await asyncio.sleep(3600)
         except Exception as e:
-            logging.error(f"review_words_loop: {e}")
+            logger.error(f"review_words_loop: {e}")
             await asyncio.sleep(3600)
 
 
 # ══════════════════════════════════════════════
 #  ЗАПУСК
 # ══════════════════════════════════════════════
-async def main():
+
+async def webhook_handler(request: web.Request) -> web.Response:
+    """Обработчик webhook для получения обновлений от Telegram."""
+    try:
+        update = types.Update(**await request.json())
+        await dp.feed_update(bot, update)
+        return web.Response(status=200)
+    except Exception as e:
+        logger.error(f"Ошибка в webhook обработчике: {e}")
+        return web.Response(status=500)
+
+
+async def health_check(request: web.Request) -> web.Response:
+    """Эндпоинт для проверки здоровья приложения (для Railway)."""
+    return web.Response(text="OK", status=200)
+
+
+async def setup_webhook():
+    """Установить webhook для бота."""
+    try:
+        if WEBHOOK_URL:
+            await bot.set_webhook(
+                url=WEBHOOK_URL,
+                allowed_updates=["message", "callback_query", "pre_checkout_query", "successful_payment"],
+                drop_pending_updates=True
+            )
+            logger.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
+        else:
+            logger.warning("⚠️ WEBHOOK_URL не установлен, пропускаем установку webhook")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при установке webhook: {e}")
+
+
+async def main_production():
+    """Главная функция для production (Railway) с webhooks."""
     await init_db()
     asyncio.create_task(notification_loop())
     asyncio.create_task(review_words_loop())
-    logging.info("Фоновые задачи запущены.")
+    logger.info("📌 Фоновые задачи запущены (production mode)")
+    
+    # Удаляем старый webhook
     await bot.delete_webhook(drop_pending_updates=True)
-    print("=== Бот EnglishDV запущен! ===")
+    
+    # Устанавливаем новый webhook
+    await setup_webhook()
+    
+    print("=" * 40)
+    print("🚀 EnglishDV запущен в PRODUCTION MODE (webhooks)")
+    print(f"🌐 Webhook URL: {WEBHOOK_URL}")
+    print(f"🔌 Слушаем на: {WEBHOOK_HOST}:{WEBHOOK_PORT}")
+    print("=" * 40)
+    
+    # Показываем режим аудио
     from src.config import GROQ_API_KEY, OPENAI_API_KEY
     if GROQ_API_KEY:
         audio_mode = "Groq Whisper (whisper-large-v3-turbo)"
@@ -1523,17 +1579,74 @@ async def main():
         audio_mode = "OpenAI Whisper"
     else:
         audio_mode = "OpenRouter fallback"
-    print(f"=== Аудио-уроки: {audio_mode} ===")
+    print(f"🎤 Аудио-уроки: {audio_mode}")
+    
+    # Создаём web приложение
+    app = web.Application()
+    app.router.add_post(WEBHOOK_PATH, webhook_handler)
+    app.router.add_get("/health", health_check)
+    
+    # Запускаем сервер
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, WEBHOOK_HOST, WEBHOOK_PORT)
+    await site.start()
+    
+    try:
+        logger.info(f"🌐 Web сервер запущен на http://{WEBHOOK_HOST}:{WEBHOOK_PORT}")
+        # Бесконечный цикл для работы webhook сервера
+        await asyncio.Event().wait()
+    except KeyboardInterrupt:
+        logger.info("⏹️ Бот остановлен (Ctrl+C)")
+    finally:
+        await runner.cleanup()
+        await bot.session.close()
+
+
+async def main_development():
+    """Главная функция для development с polling."""
+    await init_db()
+    asyncio.create_task(notification_loop())
+    asyncio.create_task(review_words_loop())
+    logger.info("📌 Фоновые задачи запущены (development mode)")
+    
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    print("=" * 40)
+    print("🤖 EnglishDV запущен в DEVELOPMENT MODE (polling)")
+    print("=" * 40)
+    
+    # Показываем режим аудио
+    from src.config import GROQ_API_KEY, OPENAI_API_KEY
+    if GROQ_API_KEY:
+        audio_mode = "Groq Whisper (whisper-large-v3-turbo)"
+    elif OPENAI_API_KEY:
+        audio_mode = "OpenAI Whisper"
+    else:
+        audio_mode = "OpenRouter fallback"
+    print(f"🎤 Аудио-уроки: {audio_mode}")
+    
     try:
         await dp.start_polling(bot)
     except Exception as e:
-        logging.error(f"Критическая ошибка: {e}")
+        logger.error(f"❌ Критическая ошибка: {e}")
     finally:
         await bot.session.close()
+
+
+async def main():
+    """Выбирает режим запуска в зависимости от окружения."""
+    if IS_PRODUCTION:
+        await main_production()
+    else:
+        await main_development()
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logging.info("Бот остановлен.")
+        logger.info("✋ Бот остановлен.")
+    except RuntimeError as e:
+        logger.critical(f"❌ Ошибка конфигурации: {e}")
+        exit(1)
