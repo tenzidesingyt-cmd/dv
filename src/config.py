@@ -21,7 +21,7 @@ RAILWAY_ENV = os.environ.get("RAILWAY_ENVIRONMENT", "development")
 IS_PRODUCTION = RAILWAY_ENV == "production" or os.environ.get("ENVIRONMENT") == "production"
 
 # Настройки для webhook (Railway)
-WEBHOOK_HOST = os.environ.get("WEBHOOK_HOST", "localhost")
+WEBHOOK_HOST = os.environ.get("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT = int(os.environ.get("PORT", 8000))
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
