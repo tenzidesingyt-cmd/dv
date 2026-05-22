@@ -11,6 +11,7 @@ import httpx
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher, types, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -643,16 +644,31 @@ async def buy_premium(call: types.CallbackQuery):
         )
 
     title = plan["ky_title"] if language == "ky" else plan["title"]
-    await bot.send_invoice(
-        chat_id=call.message.chat.id,
-        title=title,
-        description="Премиум-доступ EnglishDV с оплатой в сомах.",
-        payload=f"premium:{plan_code}:{call.from_user.id}",
-        provider_token=PAYMENT_PROVIDER_TOKEN,
-        currency=PAYMENT_CURRENCY,
-        prices=[types.LabeledPrice(label=title, amount=plan["price"])],
-        start_parameter=f"premium-{plan_code}",
-    )
+    try:
+        await bot.send_invoice(
+            chat_id=call.message.chat.id,
+            title=title,
+            description="Премиум-доступ EnglishDV с оплатой в сомах.",
+            payload=f"premium:{plan_code}:{call.from_user.id}",
+            provider_token=PAYMENT_PROVIDER_TOKEN,
+            currency=PAYMENT_CURRENCY,
+            prices=[types.LabeledPrice(label=title, amount=plan["price"])],
+            start_parameter=f"premium-{plan_code}",
+        )
+    except TelegramBadRequest as e:
+        logger.error(f"Не удалось отправить invoice: {e}")
+        message = str(e)
+        if "PAYMENT_PROVIDER_INVALID" in message:
+            await call.message.answer(
+                "Оплата пока настроена неверно.\n\n"
+                "Проверь PAYMENT_PROVIDER_TOKEN: нужен настоящий provider token из BotFather "
+                "или платёжного провайдера Telegram Payments, а не BOT_TOKEN."
+            )
+        else:
+            await call.message.answer(
+                "Не удалось создать счёт для оплаты. Попробуй позже или напиши администратору."
+            )
+        return await call.answer()
     await call.answer()
 
 
